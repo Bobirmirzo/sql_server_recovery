@@ -1,0 +1,82 @@
+--- Enabling extended events to get detailed recovery process
+CREATE
+EVENT
+SESSION [recovery_trace] ON
+SERVER
+
+ADD
+EVENT sqlserver.database_recovery_progress_report(SET collect_database_name=(1)),
+ADD
+EVENT sqlserver.database_recovery_times,
+ADD
+EVENT sqlserver.database_recovery_trace
+ADD
+TARGET package0.event_file(SET filename=N'c:\temp\recovery_trace.xel')
+WITH (MAX_MEMORY=4096 KB,
+      EVENT_RETENTION_MODE=ALLOW_SINGLE_EVENT_LOSS,
+  MAX_DISPATCH_LATENCY=3 SECONDS,
+  MAX_EVENT_SIZE=0 KB,
+  MEMORY_PARTITION_MODE=NONE,
+  TRACK_CAUSALITY=OFF,
+  STARTUP_STATE=ON)
+GO
+
+ALTER EVENT SESSION recovery_trace ON SERVER STATE = START;
+
+--- Creating tables to record resource utilization. These tables will be deleted later after troubleshooting
+USE master
+GO
+
+CREATE TABLE [dbo].[tbl_recovery_tracking](
+      [runtime] [datetime] NOT NULL,
+      [command] [nvarchar](256) NOT NULL,
+      [session_id] [smallint] NOT NULL,
+      [database_id] [smallint] NOT NULL,
+      [total_elapsed_time] [int] NOT NULL,
+      [percent_complete] [real] NOT NULL,
+      [estimated_completion_time] [bigint] NOT NULL,
+      [wait_resource] [nvarchar](256) NOT NULL,
+      [wait_time] [int] NOT NULL,
+      [wait_type] [nvarchar](60) NULL,
+      [blocking_session_id] [smallint] NULL,
+      [reads] [bigint] NOT NULL,
+      [writes] [bigint] NOT NULL,
+      [cpu_time] [int] NOT NULL
+) ON [PRIMARY]
+GO
+
+CREATE TABLE [dbo].[tbl_dm_tran_database_transactions](
+      [runtime] [datetime] NOT NULL,
+      [transaction_id] [bigint] NOT NULL,
+      [database_id] [int] NOT NULL,
+      [database_transaction_log_record_count] [bigint] NOT NULL,
+      [database_transaction_log_bytes_used] [bigint] NOT NULL,
+      [database_transaction_log_bytes_reserved] [bigint] NOT NULL,
+      [database_transaction_next_undo_lsn] [numeric](25, 0) NULL
+) ON [PRIMARY]
+GO
+
+--- Collecting the information to our tables in the loop. You should run this command while the recovery is in the process.
+USE master
+WHILE 1 = 1
+BEGIN
+      INSERT INTO [dbo].[tbl_recovery_tracking]
+      SELECT GETDATE() as runtime, command,
+      session_id, database_id, total_elapsed_time,
+      percent_complete, estimated_completion_time,
+      wait_resource, wait_time, wait_type, blocking_session_id,
+      reads, writes, cpu_time
+      FROM sys.dm_exec_requests
+      WHERE command = 'DB STARTUP' -- may need to change this if troubleshooting recovery as part of attach database or restore
+
+      INSERT INTO tbl_dm_tran_database_transactions
+      SELECT GETDATE() as runtime,
+      transaction_id, database_id,
+      database_transaction_log_record_count, database_transaction_log_bytes_used,
+      database_transaction_log_bytes_reserved, database_transaction_next_undo_lsn
+      FROM sys.dm_tran_database_transactions
+
+      WAITFOR DELAY '00:00:01' -- change this capture interval
+
+END
+GO
